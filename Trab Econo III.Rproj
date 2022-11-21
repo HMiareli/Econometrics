@@ -1,0 +1,127 @@
+library(tidyverse)
+library(plm)
+library(fixest)
+library(stargazer)
+library(rstatix)
+library(readxl)
+library(xtable)
+library(stringr)
+
+#-------------------------------------------------------------------------------------------------------------------
+
+Base <- read_excel("C:/Users/HP/Downloads/Base1 (1).xlsx", 
+                       skip = 7)
+View(Base)
+sum(is.na(Base))
+Base$Crescimento_das_vendas <- as.numeric(Base$Crescimento_das_vendas) 
+Base$Book_Value_Market_Cap <- as.numeric(Base$Book_Value_Market_Cap)
+
+Base <- Base %>% 
+  filter(Date != '2011-12-31') 
+
+Base1 <- Base %>% 
+  drop_na()
+
+Base_2012 <- Base1 %>% 
+filter(Date == '2012-12-31')
+
+Base3 <- semi_join(Base1, Base_2012, by = "Empresa")
+
+Base3 <- Base3 %>% filter(Base3$Empresa != 'DB')
+
+Base <- Base3
+
+rm(Base_2012)
+rm(Base1)
+rm(Base3)
+
+Base_Ebit <- Base %>% 
+  group_by(Empresa) %>% 
+  summarise(DP_EBIT = sd(EBIT),
+            MEDIA_EBIT = mean(EBIT))
+
+Base <- left_join(Base,Base_Ebit, by = "Empresa") %>% 
+  mutate(Risco = (DP_EBIT-MEDIA_EBIT)/Tamanho_da_empresa)
+
+Base$Tamanho_da_empresa <- log(Base$Tamanho_da_empresa)
+
+# Estatísticas descritivas # -----------------------------------------------
+
+Base <- Base %>% 
+  filter(Date != '2021-12-31') %>% 
+  filter(Date != '2020-12-31')
+
+Est_Desc <- Base %>% 
+  get_summary_stats(Indice_de_liquidez_corrente,Tamanho_da_empresa,Rentabilidade,
+                    Risco, Crescimento_das_vendas, Economia_Fiscal, Book_Value_Market_Cap, Endividamento_a_mercado,
+                    show = c("mean","median","min","max","sd"))
+
+xtable(Est_Desc, type = "latex")
+
+Base <- Base %>% arrange(Date)
+
+Base$Date <- Base$Date %>% substring(1,4)
+Base$Date <- as.numeric(Base$Date)
+
+# FE, RE e FD # ------------------------------------------------------
+
+BasePainel <- pdata.frame(Base, index = c("Empresa","Date"), row.names = TRUE)
+
+POLS_Model <- plm(Endividamento_a_mercado ~ Indice_de_liquidez_corrente + Tamanho_da_empresa + Rentabilidade +
+      Risco + Crescimento_das_vendas+ Economia_Fiscal + Book_Value_Market_Cap , data = BasePainel,
+    model = "pooling", vcov = function(x) plm::vcovHC(x,method = "arellano"))
+
+FEW_Model <- plm(Endividamento_a_mercado ~ Indice_de_liquidez_corrente + Tamanho_da_empresa + Rentabilidade +
+                Risco + Crescimento_das_vendas+ Economia_Fiscal + Book_Value_Market_Cap, data = BasePainel,
+                model = "within", vcov = function(x) plm::vcovHC(x,method = "arellano"))
+
+RE_Model <- plm(Endividamento_a_mercado ~ Indice_de_liquidez_corrente + Tamanho_da_empresa + Rentabilidade +
+                  Risco + Crescimento_das_vendas+ Economia_Fiscal + Book_Value_Market_Cap, data = BasePainel,
+                model = "random", vcov = function(x) plm::vcovHC(x,method = "arellano"))
+
+FD_Model <- plm(Endividamento_a_mercado ~ Indice_de_liquidez_corrente + Tamanho_da_empresa + Rentabilidade +
+                  Risco + Crescimento_das_vendas+ Economia_Fiscal + Book_Value_Market_Cap, data = BasePainel,
+                model = "fd", vcov = function(x) plm::vcovHC(x,method = "arellano"))
+
+stargazer(POLS_Model, FEW_Model, FD_Model, RE_Model,
+          title = "Resultados: Modelos sem defasagem",
+          column.labels = c("POLS","FE","FD","RE"),
+          intercept.bottom = FALSE,
+          align = TRUE)
+acf(FD_Model$residuals)
+acf(FEW_Model$residuals)
+acf(POLS_Model$residuals)
+
+# Instrumentos # ---------------------------------------------------
+IV_Model <- feols(Endividamento_a_mercado ~ Indice_de_liquidez_corrente + Tamanho_da_empresa + Rentabilidade +
+                    Risco + Crescimento_das_vendas + Economia_Fiscal + Book_Value_Market_Cap|
+                  l(Indice_de_liquidez_corrente,1) + l(Tamanho_da_empresa,1) + l(Rentabilidade,1) +
+                  l(Risco,1) + l(Crescimento_das_vendas,1) + l(Economia_Fiscal,1) + l(Book_Value_Market_Cap,1) + 
+                  l(Endividamento_a_mercado,1) ~
+                    l(Indice_de_liquidez_corrente,2) + l(Tamanho_da_empresa,2) + l(Rentabilidade,2) +
+                    l(Risco,2) + lag(Crescimento_das_vendas,2) + l(Economia_Fiscal,2) + l(Book_Value_Market_Cap,2) +
+                    l(Endividamento_a_mercado,2) ,panel.id = ~ Empresa +Date, data = BasePainel, vcov = "HC1"
+
+(IV <- summary(IV_Model))
+etable(IV, tex = TRUE)
+
+# Arellano Bond # ----------------------------------------------
+
+Arellano <- pgmm(Endividamento_a_mercado ~ lag(Endividamento_a_mercado,1) + lag(Indice_de_liquidez_corrente,0:1) + lag(Tamanho_da_empresa,0:1) + lag(Rentabilidade,0:1) +
+       lag(Risco,0:1) + lag(Crescimento_das_vendas,0:1) + lag(Economia_Fiscal,0:1) + lag(Book_Value_Market_Cap,0:1) | lag(Endividamento_a_mercado, 2:8)+
+         lag(Indice_de_liquidez_corrente,0:1) + lag(Tamanho_da_empresa,0:1) + lag(Rentabilidade,0:1) +
+         lag(Risco,2:8) + lag(Crescimento_das_vendas,2:8) + lag(Economia_Fiscal,2:8) + lag(Book_Value_Market_Cap,2:8)   
+       , data = BasePainel, model = "twosteps", transformation = "ld")
+
+library(texreg)
+
+extract(Arellano, include.sargan = TRUE)
+
+# Modelo FE
+
+
+summary(modelo)
+summary(modelo, vcov = function(x) plm::vcovHC(x,method = "arellano"))
+
+
+
